@@ -43,8 +43,8 @@ def verify_topics(topic: str):
         return True
     return False
 
-def verify_images(image_path: str):
-    _path = os.path.abspath(os.path.join('./images', image_path))
+def verify_images(image_path: str, images_dir_path = '../ROData/images'):
+    _path = os.path.abspath(os.path.join(images_dir_path, image_path))
     
     try:
         Image.open(_path).convert('RGB')
@@ -53,31 +53,30 @@ def verify_images(image_path: str):
 
     return True
 
-df_sarcasm = pd.read_csv('../ROData/tnr-all-articles-unique-ids.csv', low_memory=False)
-df_nonsarc = pd.read_csv('../ROData/non-sarcasm-unique-ids-tags-updated.csv', low_memory=False)
+df_sarcasm = pd.read_csv('../ROData/sarcastic_articles.csv', low_memory=False)
+df_nonsarc = pd.read_csv('../ROData/non-sarcastic_articles.csv', low_memory=False)
 df_sarcasm['sarcastic'] = 'yes'
 df_nonsarc['sarcastic'] = 'no'
 
 # select the columns to be kept from both .csv files
 df_sarcasm = df_sarcasm[
-    ['sarcastic', 'topic', 'photo_path', 'url', 'text']
+    ['sarcastic', 'topic', 'photo_path', 'url', 'article']
 ]
 df_nonsarc = df_nonsarc[
-    ['sarcastic', 'category', 'photo_path', 'website', 'content']
+    ['sarcastic', 'topic', 'photo_path', 'url', 'article']
 ]
 
 # rename the columns for compatibility
 df_sarcasm = df_sarcasm.rename(
     columns={
+        'article': 'text',
         'photo_path': 'image_path'
     }
 )
 df_nonsarc = df_nonsarc.rename(
     columns={
-        'content': 'text', 
-        'category': 'topic', 
-        'photo_path': 'image_path',
-        'website': 'url'
+        'article': 'text',
+        'photo_path': 'image_path'
     }
 )
 
