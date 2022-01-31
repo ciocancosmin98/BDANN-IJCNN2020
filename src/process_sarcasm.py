@@ -179,6 +179,20 @@ class MultimodalDataset(Dataset):
         self.save_dir = save_dir
         self.metadata = metadata
 
+        present_domains: List[str] = df['topic'].unique().tolist()
+        present_domains.sort()
+        self.domain_remapping: Dict[int, int] = {
+            metadata.domain_mapping[domain_name]: index \
+                for index, domain_name in enumerate(present_domains)
+        }
+        # domain remapping makes sure the domains that are present in this subset 
+        # are indexed starting from 0 without skips; for example, if domain 3 and 
+        # 5 are present then they'll be mapped to 0 and 1 respectively; this is 
+        # done to correctly compute the domain loss
+        df['domain'] = df['domain'].apply(
+            lambda domain_index: self.domain_remapping[domain_index]
+        )
+
         self.img_transform = img_transform
 
         self.text_tokens = self.load_text_tokens(df, force=force)
@@ -244,10 +258,14 @@ class MultimodalDataset(Dataset):
 
         reverse_label_mapping = self.metadata.reverse_label_mapping()
         reverse_domain_mapping = self.metadata.reverse_domain_mapping()
+        reverse_domain_remapping = {
+            self.domain_remapping[index]: index for index in self.domain_remapping
+        }
 
         for i in range(len(self.labels)):
             label = reverse_label_mapping[self.labels[i]]
-            domain = reverse_domain_mapping[self.domains[i]]
+            domain_global_index = reverse_domain_remapping[self.domains[i]]
+            domain = reverse_domain_mapping[domain_global_index]
 
             domain_dict = by_label.get(label, {})
             domain_dict[domain] = 1 + domain_dict.get(domain, 0)
@@ -266,16 +284,21 @@ class MultimodalDataset(Dataset):
         print(json.dumps(domain_only, indent=4))
 
 def create_subset(
+    subset: Union[str, pd.DataFrame],
     images_root_path: str,
-    subset_input_path: str,
     subset_save_dir: str,
+    name: str,
     metadata: MetaData,
     force=False
 ):
-    df = pd.read_csv(subset_input_path, delimiter='\t')
+    if isinstance(subset, pd.DataFrame):
+        df = subset
+    else:
+        df = pd.read_csv(subset, delimiter='\t')
 
+    # domain mapping turns the domain name (string) into an index (positive integer)
     df['domain'] = df['topic'].apply(
-        lambda topic: metadata.domain_mapping[topic]
+        lambda domain_name: metadata.domain_mapping[domain_name]
     )
 
     df['label'] = df['sarcastic'].apply(
@@ -286,6 +309,7 @@ def create_subset(
         lambda image_path: os.path.abspath(os.path.join(images_root_path, image_path))
     )
 
+    subset_save_dir = os.path.join(subset_save_dir, name)
     if not os.path.exists(subset_save_dir):
         os.makedirs(subset_save_dir)
 
@@ -301,30 +325,3 @@ def load_subset(dataset: MultimodalDataset, batch_size: int, shuffle: bool,
         shuffle=shuffle,
         num_workers=num_workers
     )
-
-dataset_path = '../ROData/sarcasm_dataset.csv'
-metadata_path = '../ROData/metadata.json'
-subsets_save_path = '../ROData/subsets'
-images_root_path = '../ROData/images'
-
-metadata = create_metadata(
-    dataset_path=dataset_path, 
-    images_root_path=images_root_path,
-    metadata_path=metadata_path,
-    force=False
-)
-
-dataset = create_subset(
-    images_root_path=images_root_path, 
-    subset_input_path=dataset_path, 
-    subset_save_dir=os.path.join(subsets_save_path, 'train'), 
-    metadata=metadata,
-    force=False
-)
-
-batch_size = 32
-loader = load_subset(dataset, batch_size, True)
-for index, batch in tqdm(enumerate(loader), total=(len(dataset) // batch_size)):
-    text_tokens, images, labels, domains = batch
-
-dataset.print_stats()
