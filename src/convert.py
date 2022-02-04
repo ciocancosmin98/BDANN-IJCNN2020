@@ -31,6 +31,21 @@ def translate_topic(topic: str):
 def remove_whitespace(text: str):
     return (' '.join(text.split())).replace('\n', '')
 
+def return_first_n_sentences(text: str, n = 1):
+    if n < 1:
+        raise ValueError('Number of sentences must be >1')
+
+    sentence_terminators = set(['.', '!', '?', ';', ':'])
+    
+    n_found = 0
+    for i in range(len(text)):
+        if text[i] in sentence_terminators:
+            n_found += 1
+            if n_found == n:
+                return text[:i+1]
+
+    return text
+
 def verify_text(text: str):
     if not isinstance(text, str):
         return False
@@ -100,6 +115,9 @@ df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(remove_whitespace)
 df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(remove_whitespace)
 df_sarcasm = df_sarcasm[df_sarcasm['text'].swifter.apply(verify_text)]
 df_nonsarc = df_nonsarc[df_nonsarc['text'].swifter.apply(verify_text)]
+return_first_2 = lambda text : return_first_n_sentences(text, n=2)
+df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(return_first_2)
+df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(return_first_2)
 
 df = pd.concat([df_sarcasm, df_nonsarc])
 

@@ -3,7 +3,7 @@ import os
 # for huggingface/tokenizers to work in data loader with multiple workers
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-from random import *
+import random
 from typing import Dict, Iterable, List, Union
 import numpy as np
 import pandas as pd
@@ -25,7 +25,7 @@ class MetaData:
     label_mapping: Dict[str, int]
     rgb_mean: List[float]
     rgb_std: List[float]
-    max_chars: int = 2000
+    max_chars: int = 400
     max_tokens: int = 400
 
     def __str__(self):
@@ -185,6 +185,7 @@ class MultimodalDataset(Dataset):
             metadata.domain_mapping[domain_name]: index \
                 for index, domain_name in enumerate(present_domains)
         }
+
         # domain remapping makes sure the domains that are present in this subset 
         # are indexed starting from 0 without skips; for example, if domain 3 and 
         # 5 are present then they'll be mapped to 0 and 1 respectively; this is 
@@ -195,7 +196,7 @@ class MultimodalDataset(Dataset):
 
         self.img_transform = img_transform
 
-        self.text_tokens = self.load_text_tokens(df, force=force)
+        self.text_tokens = self._load_text_tokens(df, force=force)
 
         self.image_paths: List[str] = df['image_path'].tolist()
 
@@ -214,7 +215,7 @@ class MultimodalDataset(Dataset):
             else:
                 i += 1
 
-    def load_text_tokens(self, df: pd.DataFrame, force=False):
+    def _load_text_tokens(self, df: pd.DataFrame, force=False):
         file_path = os.path.join(self.save_dir, 'bert_tokens.pt')
 
         if not force and os.path.exists(file_path):
@@ -282,6 +283,29 @@ class MultimodalDataset(Dataset):
         print(json.dumps(by_domain, indent=4))
         print(json.dumps(label_only, indent=4))
         print(json.dumps(domain_only, indent=4))
+
+class MappingDataset(Dataset):
+    def __init__(self, dataset: Dataset, mapping: List[int]):
+        self.dataset = dataset
+        self.mapping = mapping
+
+    def __len__(self):
+        return len(self.mapping)
+
+    def __getitem__(self, idx: int):
+        return self.dataset[self.mapping[idx]]
+
+def train_validate_split(dataset: Dataset, train_ratio = 0.9, seed = 42):
+    random_permutation = list(range(len(dataset)))
+    random.seed(seed)
+    random.shuffle(random_permutation)
+
+    split_index = int(len(dataset) * train_ratio)
+
+    train_subset = MappingDataset(dataset, random_permutation[:split_index])
+    valid_subset = MappingDataset(dataset, random_permutation[split_index:])
+
+    return train_subset, valid_subset
 
 def create_subset(
     subset: Union[str, pd.DataFrame],

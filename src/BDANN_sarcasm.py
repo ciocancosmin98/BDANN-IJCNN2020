@@ -1,29 +1,20 @@
+import random
+from typing import List, Union
 import numpy as np
 import argparse
-import time, os
-# import random
-import process_twitter as process_data
-import copy
-import pickle as pickle
-from random import sample
+import os
 import torchvision
 import torch
-from torch.optim.lr_scheduler import StepLR, MultiStepLR, ExponentialLR
 import torch.nn as nn
 from torch.autograd import Variable, Function
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pack_padded_sequence
 from tqdm import tqdm
-import torchvision.datasets as dsets
-import torchvision.transforms as transforms
 from sklearn import metrics
 from transformers import AutoModel
 import pandas as pd
 
-from process_sarcasm import create_metadata, create_subset, load_subset
-
-lmbd = 1.0
+from process_sarcasm import MetaData, create_metadata, create_subset, load_subset, train_validate_split, MappingDataset
 
 def to_var(x):
     if torch.cuda.is_available():
@@ -36,24 +27,35 @@ def to_np(x):
 class GradientReversal(Function):
 
     @staticmethod
-    def forward(ctx, x):
+    def forward(ctx, x, lmbd):
+        ctx.save_for_backward(x)
         ctx.lmbd = lmbd
         return x
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output * -ctx.lmbd
+        return grad_output * -ctx.lmbd, None
 
 class CNN_Fusion(nn.Module):
     def __init__(self, args):
         super(CNN_Fusion, self).__init__()
 
         self.args = args
-        self.event_num = args.event_num
+        if args.train_topics is None:
+            self.event_num = 2
+        else:
+            self.event_num = len(args.train_topics)
+
+        self.text_only = args.text_only
+        self.images_only = args.images_only
+
+        if self.text_only:
+            print('Running only on text')
+        if self.images_only:
+            print('Running on images only')
 
         self.hidden_size = args.hidden_dim
         self.lstm_size = args.embed_dim
-        self.social_size = 19
 
         # bert
         self.bert_model = AutoModel.from_pretrained("dumitrescustefan/bert-base-romanian-uncased-v1")
@@ -94,23 +96,251 @@ class CNN_Fusion(nn.Module):
 
     def forward(self, text, image):
         # IMAGE
-        image = self.vgg(image)  # [N, 512]
-        image = F.relu(self.image_fc1(image))
+        if self.text_only:
+            image = torch.zeros((text.shape[0], self.hidden_size), device='cuda:0')
+        else:
+            image = self.vgg(image)  # [N, 512]
+            image = F.relu(self.image_fc1(image))
 
-        last_hidden_state = torch.mean(self.bert_model(text)[0], dim=1, keepdim=False)
-        text = F.relu(self.fc2(last_hidden_state))
+        if self.images_only:
+            text = torch.zeros((text.shape[0], self.hidden_size), device='cuda:0')
+        else:
+            last_hidden_state = torch.mean(self.bert_model(text)[0], dim=1, keepdim=False)
+            text = F.relu(self.fc2(last_hidden_state))
+        
         text_image = torch.cat((text, image), 1)
 
         # Fake or real
         class_output = self.class_classifier(text_image)
 
         # Domain (which Event )
-        reverse_feature = self.grad_rev(text_image)
+        reverse_feature = self.grad_rev(text_image, args.lmbd)
         domain_output = self.domain_classifier(reverse_feature)
 
         return class_output, domain_output
 
-def load_dataset(args):
+def load_dataset(dataset_path: str, subsets_save_path: str, images_root_path: str,
+    metadata: MetaData, test_topics: Union[List[str], None], 
+    train_topics: Union[List[str], None], batch_size = 32):
+
+    df = pd.read_csv(dataset_path, delimiter='\t')
+
+    if not train_topics is None:
+        for topic in train_topics:
+            assert topic in metadata.domain_mapping
+
+        train_val_df = df[df.topic.isin(train_topics)].copy()
+
+        assert len(train_val_df) > 0
+
+        train_topics.sort()
+        subset_name = ('-').join(train_topics)
+
+        train_val_subset = create_subset(
+            subset=train_val_df, 
+            images_root_path=images_root_path, 
+            subset_save_dir=subsets_save_path, 
+            name=subset_name,
+            metadata=metadata,
+            force=True
+        )
+        train_val_subset.print_stats()
+        
+        train_subset, valid_subset = \
+            train_validate_split(train_val_subset, train_ratio=0.9, seed=29)
+
+        train_loader = load_subset(train_subset, batch_size, shuffle=True)
+        valid_loader = load_subset(valid_subset, batch_size, shuffle=False)
+    else:
+        train_loader = None
+        valid_loader = None
+
+    if not test_topics is None:
+        for topic in test_topics:
+            assert topic in metadata.domain_mapping
+
+        test_df = df[df.topic.isin(test_topics)].copy()
+
+        assert len(test_df) > 0
+
+        test_topics.sort()
+        subset_name = ('-').join(test_topics)
+
+        test_subset = create_subset(
+            subset=test_df, 
+            images_root_path=images_root_path, 
+            subset_save_dir=subsets_save_path, 
+            name=subset_name,
+            metadata=metadata,
+            force=True
+        )
+        test_subset.print_stats()
+
+        # delete me #####################
+        # random_perm = list(range(len(test_subset)))
+        # random.shuffle(random_perm)
+        # test_subset = MappingDataset(test_subset, random_perm)
+        #################################
+
+        test_loader = load_subset(test_subset, batch_size, shuffle=False)
+    else:
+        test_loader = None
+
+    return train_loader, valid_loader, test_loader
+
+def evaluate_loop(model: CNN_Fusion, loader: DataLoader):
+    for index, batch in tqdm(enumerate(loader), total=(len(loader))):
+        text_tokens = to_var(batch[0])
+        images = to_var(batch[1])
+        labels = to_var(batch[2])
+        domains = to_var(batch[3])
+
+        label_outputs, domain_outputs = model(text_tokens, images)
+
+        # apply argmax to select the class with the largest confidence value
+        _, label_argmax = torch.max(label_outputs, 1)
+        _, domain_argmax = torch.max(domain_outputs, 1)
+
+        if index == 0:
+            # label_score = to_np(label_outputs.squeeze())
+            label_pred = to_np(label_argmax.squeeze())
+            label_true = to_np(labels.squeeze())
+            # domain_score = to_np(domain_outputs.squeeze())
+            domain_pred = to_np(domain_argmax.squeeze())
+            domain_true = to_np(domains.squeeze())
+        else:
+            # label_score = np.concatenate((label_score, to_np(label_outputs.squeeze())), axis=0)
+            label_pred = np.concatenate((label_pred, to_np(label_argmax.squeeze())), axis=0)
+            label_true = np.concatenate((label_true, to_np(labels.squeeze())), axis=0)
+            # domain_score = np.concatenate((domain_score, to_np(domain_outputs.squeeze())), axis=0)
+            domain_pred = np.concatenate((domain_pred, to_np(domain_argmax.squeeze())), axis=0)
+            domain_true = np.concatenate((domain_true, to_np(domains.squeeze())), axis=0)
+
+    preds = {
+        'label': {
+            # 'score': label_score,
+            'pred': label_pred,
+            'true': label_true
+        },
+        'domain': {
+            # 'score': domain_score,
+            'pred': domain_pred,
+            'true': domain_true
+        }
+    }
+
+    results = {name: {} for name in preds}
+
+    for pred_name in preds:
+
+        # score = preds[pred_name]['score']
+        pred = preds[pred_name]['pred']
+        true = preds[pred_name]['true']
+
+        print(pred_name, pred.shape, pred.min(), pred.max(), true.shape, true.min(), true.max())
+
+        # skip calculating metrics if
+        if true.min() == true.max():
+            continue
+
+        results[pred_name]['accuracy'] = metrics.accuracy_score(true, pred)
+        results[pred_name]['f1_score'] = metrics.f1_score(true, pred, average='macro')
+        results[pred_name]['precision'] = metrics.precision_score(true, pred, average='macro')
+        results[pred_name]['recall'] = metrics.recall_score(true, pred, average='macro')
+
+        # score_convert = [x[1] for x in score]
+        # result['aucroc'] = metrics.roc_auc_score(true, score_convert, average='macro')
+
+        results[pred_name]['confusion_matrix'] = metrics.confusion_matrix(true, pred)
+        results[pred_name]['report'] = metrics.classification_report(true, pred)
+
+    return results
+
+def train_loop(model: CNN_Fusion, train_loader: DataLoader, 
+    valid_loader: DataLoader, save_dir: str, n_epochs = 10, lr = 0.001, 
+    domain_adaptation = True):
+    
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, list(model.parameters())),
+        lr=lr, 
+        weight_decay=0.1
+    )
+
+    best_valid_acc = 0.0
+
+    for epoch in tqdm(range(n_epochs)):
+
+        p = float(epoch) / n_epochs
+
+        optimizer.lr = 0.001 / (1. + 10 * p) ** 0.75
+        # rgs.lambd = lambd
+        cost_vector = []
+        class_cost_vector = []
+        domain_cost_vector = []
+        acc_vector = []
+
+        for batch in tqdm(train_loader, total=(len(train_loader))):
+            text_tokens, images, labels, domains = to_var(batch[0]), \
+                to_var(batch[1]), to_var(batch[2]), to_var(batch[3])
+            
+            optimizer.zero_grad()
+            class_outputs, domain_outputs = model(text_tokens, images)
+
+            class_loss = criterion(class_outputs, labels)
+            domain_loss = criterion(domain_outputs, domains)
+
+            if domain_adaptation:
+                loss = class_loss + domain_loss
+            else:
+                loss = class_loss
+
+            loss.backward()
+            optimizer.step()
+
+            _, argmax = torch.max(class_outputs, 1)
+            accuracy = (labels == argmax.squeeze()).float().mean()
+
+            class_cost_vector.append(class_loss.item())
+            domain_cost_vector.append(domain_loss.item())
+            cost_vector.append(loss.item())
+            acc_vector.append(accuracy.item())
+
+        model.eval()
+        results = evaluate_loop(model, valid_loader)
+        model.train()
+
+        best = False
+        if results['label']['accuracy'] > best_valid_acc:
+            best_valid_acc = results['label']['accuracy']
+            best = True
+
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        model_name = str(epoch + 1)
+        if best:
+            model_name = model_name + '-best'
+
+        torch.save(model.state_dict(), os.path.join(save_dir, model_name))
+
+        print('Epoch [%d/%d],  Loss: %.4f, Class Loss: %.4f, domain loss: %.4f, Train_Acc: %.4f,  Validate_Acc: %.4f.' % \
+            (
+                  epoch + 1, 
+                  args.num_epochs, 
+                  np.mean(cost_vector), 
+                  np.mean(class_cost_vector),
+                  np.mean(domain_cost_vector),
+                  np.mean(acc_vector), 
+                  results['label']['accuracy']
+            )
+        )
+        print("Domain report:\n%s\n"
+            % (results['domain']['report']))
+        print("Domain confusion matrix:\n%s\n"
+            % (results['domain']['confusion_matrix']))
+
+def main(args):
     dataset_path = '../ROData/sarcasm_dataset.csv'
     metadata_path = '../ROData/metadata.json'
     subsets_save_path = '../ROData/subsets'
@@ -123,159 +353,47 @@ def load_dataset(args):
         force=False
     )
 
-    df = pd.read_csv(dataset_path, delimiter='\t')
-
-    train_val_df = df[df.topic.isin(['politics', 'social'])].copy()
-    test_df = df[df.topic.isin(['sports'])].copy()
-
-    train_subset = create_subset(
-        subset=train_val_df, 
+    train_loader, valid_loader, test_loader = load_dataset(
+        dataset_path=dataset_path, 
+        subsets_save_path=subsets_save_path, 
         images_root_path=images_root_path, 
-        subset_save_dir=subsets_save_path, 
-        name='train',
-        metadata=metadata,
-        force=False
+        metadata=metadata, 
+        train_topics=args.train_topics, 
+        test_topics=args.test_topics
     )
-
-    test_subset = create_subset(
-        subset=test_df, 
-        images_root_path=images_root_path, 
-        subset_save_dir=subsets_save_path, 
-        name='test',
-        metadata=metadata,
-        force=False
-    )
-
-    train_subset.print_stats()
-    test_subset.print_stats()
-
-    batch_size = 32
-    train_loader = load_subset(train_subset, batch_size, shuffle=True)
-    test_loader = load_subset(test_subset, batch_size, shuffle=False)
-
-    return train_loader, test_loader
-
-def main(args):
-    train_loader, test_loader = load_dataset(args)
 
     model = CNN_Fusion(args)
-    if torch.cuda.is_available():
-        print("CUDA")
-        model.cuda()
+    if len(args.evaluate) == 0:
+        if torch.cuda.is_available():
+            print("CUDA")
+            model.cuda()
+        train_loop(
+            model=model, 
+            train_loader=train_loader, 
+            valid_loader=valid_loader,
+            save_dir=args.save_dir, 
+            n_epochs=args.num_epochs, 
+            lr=args.learning_rate,
+            domain_adaptation=(not args.no_domain_adaptation)
+        )
+    else:
+        model.load_state_dict(torch.load(args.evaluate))
+        if torch.cuda.is_available():
+            print("CUDA")
+            model.cuda()
 
-    # Loss and Optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, list(model.parameters())),
-                                 lr=args.learning_rate, weight_decay=0.1)
-
-    best_validate_dir = ''
-
-    # Train the Model
-    for epoch in tqdm(range(args.num_epochs)):
-
-        p = float(epoch) / 100
-        # lambd = 2. / (1. + np.exp(-10. * p)) - 1
-        lr = 0.001 / (1. + 10 * p) ** 0.75
-
-        optimizer.lr = lr
-        # rgs.lambd = lambd
-        cost_vector = []
-        class_cost_vector = []
-        domain_cost_vector = []
-        acc_vector = []
-        valid_acc_vector = []
-        vali_cost_vector = []
-
-        for batch in tqdm(train_loader, total=(len(train_loader))):
-            text_tokens, images, labels, domains = to_var(batch[0]), \
-                to_var(batch[1]), to_var(batch[2]), to_var(batch[3])
-            
-            optimizer.zero_grad()
-            class_outputs, domain_outputs = model(text_tokens, images)
-
-            # Fake or Real loss
-            class_loss = criterion(class_outputs, labels)
-            # Event Loss
-            domain_loss = criterion(domain_outputs, domains)
-            #loss = class_loss + domain_loss
-            loss = class_loss
-            loss.backward()
-            optimizer.step()
-            _, argmax = torch.max(class_outputs, 1)
-
-            accuracy = (labels == argmax.squeeze()).float().mean()
-
-            class_cost_vector.append(class_loss.item())
-            domain_cost_vector.append(domain_loss.item())
-            cost_vector.append(loss.item())
-            acc_vector.append(accuracy.item())
-
-        # model.eval()
-        # validate_acc_vector_temp = []
-        # for batch in tqdm(test_loader, total=(len(test_loader))):
-        #     text_tokens, images, labels, domains = to_var(batch[0]), \
-        #         to_var(batch[1]), to_var(batch[2]), to_var(batch[3])
-        #     validate_outputs, domain_outputs = model(text_tokens, images)
-        #     _, validate_argmax = torch.max(validate_outputs, 1)
-        #     vali_loss = criterion(validate_outputs, labels)
-        #     validate_accuracy = (labels == validate_argmax.squeeze()).float().mean()
-        #     vali_cost_vector.append(vali_loss.item())
-        #     validate_acc_vector_temp.append(validate_accuracy.item())
-        # validate_acc = np.mean(validate_acc_vector_temp)
-        # valid_acc_vector.append(validate_acc)
-        # model.train()
-        # print('Epoch [%d/%d],  Loss: %.4f, Class Loss: %.4f, domain loss: %.4f, Train_Acc: %.4f,  Validate_Acc: %.4f.'
-        #       % (
-        #           epoch + 1, args.num_epochs, np.mean(cost_vector), np.mean(class_cost_vector),
-        #           np.mean(domain_cost_vector),
-        #           np.mean(acc_vector), validate_acc))
-
-    #model = CNN_Fusion(args)
-    #model.load_state_dict(torch.load(best_validate_dir))
-    #    print(torch.cuda.is_available())
-    if torch.cuda.is_available():
-        model.cuda()
     model.eval()
-    test_score = []
-    test_pred = []
-    test_true = []
-    for index, batch in tqdm(enumerate(test_loader), total=(len(test_loader))):
-        text_tokens, images, labels, domains = to_var(batch[0]), \
-            to_var(batch[1]), to_var(batch[2]), to_var(batch[3])
-        test_outputs, domain_outputs = model(text_tokens, images)
-        _, test_argmax = torch.max(test_outputs, 1)
-        if index == 0:
-            test_score = to_np(test_outputs.squeeze())
-            test_pred = to_np(test_argmax.squeeze())
-            test_true = to_np(labels.squeeze())
-        else:
-            test_score = np.concatenate((test_score, to_np(test_outputs.squeeze())), axis=0)
-            test_pred = np.concatenate((test_pred, to_np(test_argmax.squeeze())), axis=0)
-            test_true = np.concatenate((test_true, to_np(labels.squeeze())), axis=0)
+    results = evaluate_loop(model, test_loader)
 
-    test_accuracy = metrics.accuracy_score(test_true, test_pred)
-    test_f1 = metrics.f1_score(test_true, test_pred, average='macro')
-    test_precision = metrics.precision_score(test_true, test_pred, average='macro')
-    test_recall = metrics.recall_score(test_true, test_pred, average='macro')
-    test_score_convert = [x[1] for x in test_score]
-    test_aucroc = metrics.roc_auc_score(test_true, test_score_convert, average='macro')
-
-    test_confusion_matrix = metrics.confusion_matrix(test_true, test_pred)
-
-    print("Classification Acc: %.4f, AUC-ROC: %.4f"
-          % (test_accuracy, test_aucroc))
+    print("Classification Acc: %.4f"
+          % (results['label']['accuracy']))
     print("Classification report:\n%s\n"
-          % (metrics.classification_report(test_true, test_pred)))
+          % (results['label']['report']))
     print("Classification confusion matrix:\n%s\n"
-          % (test_confusion_matrix))
+          % (results['label']['confusion_matrix']))
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
-
-    #parser.add_argument('training_file', type=str, metavar='<training_file>', help='')
-    # parser.add_argument('validation_file', type=str, metavar='<validation_file>', help='')
-    #parser.add_argument('testing_file', type=str, metavar='<testing_file>', help='')
-    #parser.add_argument('output_file', type=str, metavar='<output_file>', help='')
 
     parser.add_argument('--static', type=bool, default=True, help='')
     parser.add_argument('--sequence_length', type=int, default=28, help='')
@@ -285,17 +403,35 @@ def parse_arguments():
     parser.add_argument('--vocab_size', type=int, default=300, help='')
     parser.add_argument('--dropout', type=int, default=0.5, help='')
     parser.add_argument('--filter_num', type=int, default=5, help='')
-    parser.add_argument('--lambd', type=int, default=1, help='')
-    parser.add_argument('--text_only', type=bool, default=False, help='')
+    parser.add_argument('--lmbd', type=float, default=1, help='')
     parser.add_argument('--d_iter', type=int, default=3, help='')
     parser.add_argument('--batch_size', type=int, default=32, help='')
-    parser.add_argument('--num_epochs', type=int, default=1, help='')
+    parser.add_argument('--num_epochs', type=int, default=5, help='')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='')
-    parser.add_argument('--event_num', type=int, default=10, help='')
+    parser.add_argument('--save_dir', type=str, default='../models/testrun')
+    parser.add_argument('--text_only', action='store_true')
+    parser.add_argument('--images_only', action='store_true')
+    parser.add_argument('--no_domain_adaptation', action='store_true')
+    parser.add_argument('--train_topics', nargs='+')
+    parser.add_argument('--test_topics', nargs='+')
+    parser.add_argument('--evaluate', type=str, default='', help='The path to the model to be evaluated.')
 
     parser.add_argument('--bert_hidden_dim', type=int, default=768, help='')
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    assert not (args.text_only and args.images_only)
+
+    if len(args.evaluate) != 0:
+        # evaluation only mode
+        assert os.path.exists(args.evaluate)
+        assert len(args.test_topics) > 0
+    else:
+        # train mode
+        assert len(args.train_topics) > 0
+        assert len(args.test_topics) > 0
+
+    return args
 
 if __name__ == '__main__':
     args = parse_arguments()
