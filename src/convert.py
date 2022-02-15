@@ -1,3 +1,4 @@
+from typing import Union
 import pandas as pd
 import swifter
 import numpy as np
@@ -49,7 +50,9 @@ def return_first_n_sentences(text: str, n = 1):
 def verify_text(text: str):
     if not isinstance(text, str):
         return False
-    if len(text) == 0:
+    if len(text) > 3000:
+        return False
+    if len(text) < 40:
         return False
     return True
 
@@ -115,9 +118,46 @@ df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(remove_whitespace)
 df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(remove_whitespace)
 df_sarcasm = df_sarcasm[df_sarcasm['text'].swifter.apply(verify_text)]
 df_nonsarc = df_nonsarc[df_nonsarc['text'].swifter.apply(verify_text)]
+
 return_first_2 = lambda text : return_first_n_sentences(text, n=2)
 df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(return_first_2)
 df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(return_first_2)
+
+def balance_df(df1: pd.DataFrame, df2: pd.DataFrame, topic: str, 
+    _min: Union[int, None] = None):
+
+    df1_topic = df1[df1['topic'] == topic]
+    df2_topic = df2[df2['topic'] == topic]
+    df1_rest = df1[df1['topic'] != topic]
+    df2_rest = df2[df2['topic'] != topic]
+
+    if _min is None:
+        _min = min(len(df1_topic), len(df2_topic))
+
+    df1_topic = df1_topic[:_min]
+    df2_topic = df2_topic[:_min]
+
+    df1_merged = pd.concat([df1_rest, df1_topic])
+    df2_merged = pd.concat([df2_rest, df2_topic])
+
+    print(len(df1_topic), len(df2_topic), len(df1_rest), len(df2_rest))
+    
+    return df1_merged, df2_merged, _min
+
+# # sort to take the largest articles first
+# s1 = df_sarcasm.text.str.len().sort_values(ascending=False).index
+# df_sarcasm = df_sarcasm.reindex(s1)
+
+# sort to take the smallest articles first
+s2 = df_nonsarc.text.str.len().sort_values(ascending=True).index
+df_nonsarc = df_nonsarc.reindex(s2)
+
+df_sarcasm, df_nonsarc, _min = balance_df(df_sarcasm, df_nonsarc, 'sports')
+df_sarcasm, df_nonsarc, _ = balance_df(df_sarcasm, df_nonsarc, 'politics', _min)
+df_sarcasm, df_nonsarc, _ = balance_df(df_sarcasm, df_nonsarc, 'social', _min)
+
+print(max(df_nonsarc.text.str.len()))
+print(max(df_sarcasm.text.str.len()))
 
 df = pd.concat([df_sarcasm, df_nonsarc])
 
@@ -133,7 +173,7 @@ print(lengths.mean(), np.median(lengths))
 print(len(df), len(df_sarcasm), len(df_nonsarc))
 
 df.to_csv(
-    '../ROData/sarcasm_dataset.csv',
+    '../ROData/sarcasm_dataset_1000_1000_1000.csv',
     columns=['id', 'sarcastic', 'topic', 'url', 'image_path', 'text'],
     sep='\t', 
     index=False

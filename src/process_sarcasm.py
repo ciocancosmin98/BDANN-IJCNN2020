@@ -25,8 +25,8 @@ class MetaData:
     label_mapping: Dict[str, int]
     rgb_mean: List[float]
     rgb_std: List[float]
-    max_chars: int = 400
-    max_tokens: int = 400
+    max_chars: int = 500
+    max_tokens: int = 200
 
     def __str__(self):
         return str(self.__dict__)
@@ -349,3 +349,29 @@ def load_subset(dataset: MultimodalDataset, batch_size: int, shuffle: bool,
         shuffle=shuffle,
         num_workers=num_workers
     )
+
+
+# dataset_path = '../ROData/sarcasm_dataset.csv'
+# metadata_path = '../ROData/metadata.json'
+# subsets_save_path = '../ROData/subsets'
+# images_root_path = '../ROData/images'
+
+# metadata = create_metadata(
+#     dataset_path=dataset_path, 
+#     images_root_path=images_root_path,
+#     metadata_path=metadata_path,
+#     force=False
+# )
+
+# df = pd.read_csv(dataset_path, delimiter='\t')
+
+# subset = create_subset(
+#     subset=df, 
+#     images_root_path=images_root_path, 
+#     subset_save_dir=subsets_save_path, 
+#     name='delete_me',
+#     metadata=metadata,
+#     force=True
+# )
+        
+# subset.print_stats()
