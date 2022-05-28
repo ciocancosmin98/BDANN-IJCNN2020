@@ -3,7 +3,35 @@ import pandas as pd
 import swifter
 import numpy as np
 from PIL import Image
+import argparse
 import os
+import string
+
+parser = argparse.ArgumentParser('Tool for merging the two datasets')
+parser.add_argument(
+    '--sarcastic-path', 
+    type=str, 
+    default='../ROData/sarcastic_articles_anonymized_step2.csv',
+    help='The path to the dataset from Times New Roman'
+)
+parser.add_argument(
+    '--non-sarcastic-path', 
+    type=str, 
+    default='../ROData/non-sarcastic_articles_anonymized_step2.csv',
+    help='The path to the dataset from Stiri Pe Surse'
+)
+parser.add_argument(
+    '--output-path', 
+    type=str, 
+    default='../ROData/merged.csv',
+    help='Where to save the merged dataset'
+)
+parser.add_argument(
+    '--use-title',
+    action='store_true',
+    help='Use only the title of the article as the text component'
+)
+args = parser.parse_args()
 
 translation_dict = {
     'economie': 'economy',
@@ -47,6 +75,29 @@ def return_first_n_sentences(text: str, n = 1):
 
     return text
 
+def return_first_n_words(text: str, n = 20):
+    if n < 1:
+        raise ValueError('Number of words must be >1')
+
+    words = text.split(' ')
+
+    i = 0
+    while i < len(words):
+        if len(words[i]) == 0:
+            words.pop(i)
+        else:
+            i += 1
+
+    if len(words) > n:
+        words = words[:n]
+
+    return ' '.join(words)
+
+def process_text(text: str):
+    text = text.lower()
+    # text = text.translate(str.maketrans('', '', string.punctuation))
+    return text
+
 def verify_text(text: str):
     if not isinstance(text, str):
         return False
@@ -71,29 +122,34 @@ def verify_images(image_path: str, images_dir_path = '../ROData/images'):
 
     return True
 
-df_sarcasm = pd.read_csv('../ROData/sarcastic_articles.csv', low_memory=False)
-df_nonsarc = pd.read_csv('../ROData/non-sarcastic_articles.csv', low_memory=False)
+if args.use_title:
+    text_source = 'title_anonymized'
+else:
+    text_source = 'article_anonymized'
+
+df_sarcasm = pd.read_csv(args.sarcastic_path, low_memory=False)
+df_nonsarc = pd.read_csv(args.non_sarcastic_path, low_memory=False)
 df_sarcasm['sarcastic'] = 'yes'
 df_nonsarc['sarcastic'] = 'no'
 
 # select the columns to be kept from both .csv files
 df_sarcasm = df_sarcasm[
-    ['sarcastic', 'topic', 'photo_path', 'url', 'article']
+    ['sarcastic', 'topic', 'photo_path', 'url', text_source]
 ]
 df_nonsarc = df_nonsarc[
-    ['sarcastic', 'topic', 'photo_path', 'url', 'article']
+    ['sarcastic', 'topic', 'photo_path', 'url', text_source]
 ]
 
 # rename the columns for compatibility
 df_sarcasm = df_sarcasm.rename(
     columns={
-        'article': 'text',
+        text_source: 'text',
         'photo_path': 'image_path'
     }
 )
 df_nonsarc = df_nonsarc.rename(
     columns={
-        'article': 'text',
+        text_source: 'text',
         'photo_path': 'image_path'
     }
 )
@@ -118,10 +174,17 @@ df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(remove_whitespace)
 df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(remove_whitespace)
 df_sarcasm = df_sarcasm[df_sarcasm['text'].swifter.apply(verify_text)]
 df_nonsarc = df_nonsarc[df_nonsarc['text'].swifter.apply(verify_text)]
+df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(process_text)
+df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(process_text)
 
-return_first_2 = lambda text : return_first_n_sentences(text, n=2)
-df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(return_first_2)
-df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(return_first_2)
+# return_first_2 = lambda text : return_first_n_sentences(text, n=2)
+# df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(return_first_2)
+# df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(return_first_2)
+
+return_first_words = lambda text : return_first_n_words(text, n=60)
+df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(return_first_words)
+df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(return_first_words)
+
 
 def balance_df(df1: pd.DataFrame, df2: pd.DataFrame, topic: str, 
     _min: Union[int, None] = None):
@@ -140,40 +203,50 @@ def balance_df(df1: pd.DataFrame, df2: pd.DataFrame, topic: str,
     df1_merged = pd.concat([df1_rest, df1_topic])
     df2_merged = pd.concat([df2_rest, df2_topic])
 
-    print(len(df1_topic), len(df2_topic), len(df1_rest), len(df2_rest))
+    print(f'For the topic "{topic}", after balancing there are {2 * _min} articles in total')
     
     return df1_merged, df2_merged, _min
 
-# # sort to take the largest articles first
-# s1 = df_sarcasm.text.str.len().sort_values(ascending=False).index
-# df_sarcasm = df_sarcasm.reindex(s1)
+# sort to take the largest articles first
+s1 = df_sarcasm.text.str.len().sort_values(ascending=False).index
+df_sarcasm = df_sarcasm.reindex(s1)
 
-# sort to take the smallest articles first
-s2 = df_nonsarc.text.str.len().sort_values(ascending=True).index
+# sort to take the largest articles first
+s2 = df_nonsarc.text.str.len().sort_values(ascending=False).index
 df_nonsarc = df_nonsarc.reindex(s2)
+
+# # sort to take the smallest articles first
+# s2 = df_nonsarc.text.str.len().sort_values(ascending=True).index
+# df_nonsarc = df_nonsarc.reindex(s2)
 
 df_sarcasm, df_nonsarc, _min = balance_df(df_sarcasm, df_nonsarc, 'sports')
 df_sarcasm, df_nonsarc, _ = balance_df(df_sarcasm, df_nonsarc, 'politics', _min)
 df_sarcasm, df_nonsarc, _ = balance_df(df_sarcasm, df_nonsarc, 'social', _min)
 
-print(max(df_nonsarc.text.str.len()))
-print(max(df_sarcasm.text.str.len()))
+lengths_sarc = np.array([len(text) for text in df_sarcasm['text']])
+lengths_nonsarc = np.array([len(text) for text in df_nonsarc['text']])
+print(f'Sarcastic text length:')
+print(f'\tMAX    - {lengths_sarc.max()}')
+print(f'\tMEAN   - {lengths_sarc.mean()}')
+print(f'\tMEDIAN - {np.median(lengths_sarc)}')
+print(f'Non-sarcastic text length:')
+print(f'\tMAX    - {lengths_nonsarc.max()}')
+print(f'\tMEAN   - {lengths_nonsarc.mean()}')
+print(f'\tMEDIAN - {np.median(lengths_nonsarc)}')
 
 df = pd.concat([df_sarcasm, df_nonsarc])
 
-assert len(df['id'].unique()) == len(df)
-
 df.dropna(inplace=True)
 
-lengths = np.array([len(text) for text in df_sarcasm['text']])
-print(lengths.mean(), np.median(lengths))
-lengths = np.array([len(text) for text in df_nonsarc['text']])
-print(lengths.mean(), np.median(lengths))
+if not len(df['id'].unique()) == len(df):
+    raise Exception('The ids of the resulting dataset are not all unique')
 
-print(len(df), len(df_sarcasm), len(df_nonsarc))
+for text in df_sarcasm['text'].to_list():
+    print(text)
+    break
 
 df.to_csv(
-    '../ROData/sarcasm_dataset_1000_1000_1000.csv',
+    args.output_path,
     columns=['id', 'sarcastic', 'topic', 'url', 'image_path', 'text'],
     sep='\t', 
     index=False
