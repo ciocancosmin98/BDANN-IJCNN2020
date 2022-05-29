@@ -148,7 +148,8 @@ def bert_tokenize(texts: Iterable[str], max_chars: int = None,
             encoded: List[int] = tokenizer.encode(text, add_special_tokens=True)
 
             if not max_tokens is None and len(encoded) > max_tokens:
-                text_tokens.append(None)
+                text_tokens.append(encoded[:max_tokens])
+                max_encoding_len = max_tokens
             else:
                 text_tokens.append(encoded)
                 max_encoding_len = max(max_encoding_len, len(encoded))

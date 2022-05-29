@@ -62,8 +62,9 @@ class CNN_Fusion(nn.Module):
         self.bert_hidden_size = args.bert_hidden_dim
         self.fc2 = nn.Linear(self.bert_hidden_size, self.hidden_size)
 
-        for param in self.bert_model.parameters():
-            param.requires_grad = False
+        if args.freeze_bert:
+            for param in self.bert_model.parameters():
+                param.requires_grad = False
         #self.bertModel = bert_model
 
         self.dropout = nn.Dropout(args.dropout)
@@ -113,7 +114,7 @@ class CNN_Fusion(nn.Module):
         return text_features, image_features
 
 
-    def forward(self, text, image):
+    def forward(self, text, image, lmbd=0.5):
         # IMAGE
         if self.text_only:
             image = torch.zeros((text.shape[0], self.hidden_size), device='cuda:0')
@@ -135,7 +136,7 @@ class CNN_Fusion(nn.Module):
         #class_output = self.class_classifier(mixed_features)
 
         # Domain (which Event )
-        reverse_feature = self.grad_rev(text_image, args.lmbd)
+        reverse_feature = self.grad_rev(text_image, lmbd)
         #reverse_feature = self.grad_rev(mixed_features, args.lmbd)
         domain_output = self.domain_classifier(reverse_feature)
 
@@ -212,14 +213,25 @@ def load_dataset(dataset_path: str, subsets_save_path: str, images_root_path: st
 
     return train_loader, valid_loader, test_loader
 
-def evaluate_loop(model: CNN_Fusion, loader: DataLoader):
+def evaluate_loop(model: CNN_Fusion, loader: DataLoader, domain_adaptation: bool):
+    total_label_loss = 0
+    total_domain_loss = 0
+    n = 0
+
     for index, batch in tqdm(enumerate(loader), total=(len(loader))):
         text_tokens = to_var(batch[0])
         images = to_var(batch[1])
         labels = to_var(batch[2])
         domains = to_var(batch[3])
 
-        label_outputs, domain_outputs = model(text_tokens, images)
+        with torch.no_grad():
+            label_outputs, domain_outputs = model(text_tokens, images)
+
+            criterion = nn.CrossEntropyLoss()
+            total_label_loss += criterion(label_outputs, labels).item()
+            total_domain_loss += criterion(domain_outputs, domains).item()
+            n += len(label_outputs)
+
 
         # apply argmax to select the class with the largest confidence value
         _, label_argmax = torch.max(label_outputs, 1)
@@ -248,6 +260,8 @@ def evaluate_loop(model: CNN_Fusion, loader: DataLoader):
     }
 
     results = {name: {} for name in preds}
+    results['label']['loss'] = total_label_loss / n
+    results['domain']['loss'] = total_domain_loss / n
 
     for pred_name in preds:
 
@@ -274,12 +288,20 @@ def train_loop(model: CNN_Fusion, train_loader: DataLoader,
     
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
-        filter(lambda p: p.requires_grad, list(model.parameters())),
+        [
+            {'params': model.bert_model.parameters(), 'lr': lr * 1e-3, 'weight_decay': 0},
+            {'params': model.class_classifier.parameters(), 'lr': lr},
+            {'params': model.domain_classifier.parameters(), 'lr': lr}
+        ],
+        #filter(lambda p: p.requires_grad, list(model.parameters())),
         lr=lr, 
         weight_decay=0.1
     )
 
     best_valid_acc = 0.0
+
+    epoch_steps = len(train_loader)
+    total_steps = n_epochs * epoch_steps
 
     for epoch in tqdm(range(n_epochs)):
 
@@ -292,12 +314,15 @@ def train_loop(model: CNN_Fusion, train_loader: DataLoader,
         domain_cost_vector = []
         acc_vector = []
 
-        for batch in tqdm(train_loader, total=(len(train_loader))):
+        for index, batch in enumerate(tqdm(train_loader, total=(len(train_loader)))):
             text_tokens, images, labels, domains = to_var(batch[0]), \
                 to_var(batch[1]), to_var(batch[2]), to_var(batch[3])
             
+            step = epoch * epoch_steps + index
+            lmbd = args.lmbd * (step / total_steps)
+
             optimizer.zero_grad()
-            class_outputs, domain_outputs = model(text_tokens, images)
+            class_outputs, domain_outputs = model(text_tokens, images, lmbd)
 
             class_loss = criterion(class_outputs, labels)
             domain_loss = criterion(domain_outputs, domains)
@@ -319,12 +344,31 @@ def train_loop(model: CNN_Fusion, train_loader: DataLoader,
             acc_vector.append(accuracy.item())
 
         model.eval()
-        results = evaluate_loop(model, valid_loader)
+        results_train = evaluate_loop(model, train_loader, domain_adaptation)
+        results_valid = evaluate_loop(model, valid_loader, domain_adaptation)
         model.train()
 
+        print("Train Acc: %.4f"
+            % (results_train['label']['accuracy']))
+        print("Train loss:\n%s\n"
+            % (results_train['label']['loss']))
+        print("Train report:\n%s\n"
+            % (results_train['label']['report']))
+        print("Train confusion matrix:\n%s\n"
+            % (results_train['label']['confusion_matrix']))
+
+        print("Val Acc: %.4f"
+            % (results_valid['label']['accuracy']))
+        print("Val loss:\n%s\n"
+            % (results_valid['label']['loss']))
+        print("Val report:\n%s\n"
+            % (results_valid['label']['report']))
+        print("Val confusion matrix:\n%s\n"
+            % (results_valid['label']['confusion_matrix']))
+
         best = False
-        if results['label']['accuracy'] > best_valid_acc:
-            best_valid_acc = results['label']['accuracy']
+        if results_valid['label']['accuracy'] > best_valid_acc:
+            best_valid_acc = results_valid['label']['accuracy']
             best = True
 
         if not os.path.exists(save_dir):
@@ -346,13 +390,13 @@ def train_loop(model: CNN_Fusion, train_loader: DataLoader,
                     np.mean(class_cost_vector),
                     np.mean(domain_cost_vector),
                     np.mean(acc_vector), 
-                    results['label']['accuracy']
+                    results_valid['label']['accuracy']
                 )
             )
             print("Domain report:\n%s\n"
-                % (results['domain']['report']))
+                % (results_valid['domain']['report']))
             print("Domain confusion matrix:\n%s\n"
-                % (results['domain']['confusion_matrix']))
+                % (results_valid['domain']['confusion_matrix']))
 
     return best_model_path
 
@@ -362,7 +406,8 @@ def main(args):
     recall_scores = []
     precision_scores = []
 
-    dataset_path = '../ROData/sarcasm_dataset_1000_1000_1000.csv'
+    dataset_path = '../ROData/sarcasm_body_anonimized_1000_new.csv'
+    # dataset_path = '../ROData/sarcasm_title_anonimized_1000.csv'
     metadata_path = '../ROData/metadata.json'
     subsets_save_path = '../ROData/subsets'
     images_root_path = '../ROData/images'
@@ -406,13 +451,15 @@ def main(args):
             model.cuda()
 
         model.eval()
-        results = evaluate_loop(model, test_loader)
+        results = evaluate_loop(model, test_loader, (not args.no_domain_adaptation))
 
-        print("Classification Acc: %.4f"
+        print("Test Acc: %.4f"
             % (results['label']['accuracy']))
-        print("Classification report:\n%s\n"
+        print("Test loss:\n%s\n"
+            % (results['label']['loss']))
+        print("Test report:\n%s\n"
             % (results['label']['report']))
-        print("Classification confusion matrix:\n%s\n"
+        print("Test confusion matrix:\n%s\n"
             % (results['label']['confusion_matrix']))
 
         results = results['label']
@@ -452,6 +499,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--static', type=bool, default=True, help='')
+    parser.add_argument('--freeze_bert', action='store_true', help='')
     parser.add_argument('--sequence_length', type=int, default=28, help='')
     parser.add_argument('--class_num', type=int, default=2, help='')
     parser.add_argument('--hidden_dim', type=int, default=32, help='')

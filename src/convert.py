@@ -181,7 +181,7 @@ df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(process_text)
 # df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(return_first_2)
 # df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(return_first_2)
 
-return_first_words = lambda text : return_first_n_words(text, n=60)
+return_first_words = lambda text : return_first_n_words(text, n=50)
 df_sarcasm['text'] = df_sarcasm['text'].swifter.apply(return_first_words)
 df_nonsarc['text'] = df_nonsarc['text'].swifter.apply(return_first_words)
 
