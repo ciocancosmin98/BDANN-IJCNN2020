@@ -227,7 +227,7 @@ class MultimodalDataset(Dataset):
             self.metadata.max_chars,
             self.metadata.max_tokens
         )
-        text_tokens = pad_bert_tokens(text_tokens, max_encoded_len)
+        text_tokens = pad_bert_tokens(text_tokens, self.metadata.max_tokens)
 
         torch.save(text_tokens, file_path)
 
