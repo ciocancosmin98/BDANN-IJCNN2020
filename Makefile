@@ -1,14 +1,35 @@
-.PHONY: pimage pclean prun pcleanall
+.PHONY: podman-image podman-run podman-clean podman-purge
+	docker-image docker-run docker-clean docker-purge
 
 TAG=ubuntu:bdann
-DOCKERFILE=./podman/CUDA11.Dockerfile
 CONTAINERNAME=bdann1
 
-pimage:
-	podman build --tag $(TAG) -f $(DOCKERFILE)
-pclean:
+podman-image:
+	podman build --tag $(TAG) ./Dockerfile
+podman-run:
+	podman run -it \
+		--rm \
+		--name=$(CONTAINERNAME) \
+		--shm-size=4g \
+		-v .:/storage \
+		--security-opt=label=disable \
+		$(TAG)
+podman-clean:
 	podman rmi $(TAG)
-prun:
-	podman run -d -it --name=$(CONTAINERNAME) --shm-size=4g -v .:/bdann --security-opt=label=disable $(TAG)
-pcleanall:
+podman-purge:
 	podman system prune --all --force && podman rmi --all
+
+docker-image:
+	docker build --tag $(TAG) .
+docker-run:
+	docker run -it \
+		--rm \
+		--name=$(CONTAINERNAME) \
+		--shm-size=4g \
+		-v "$(shell pwd)":/storage \
+		--gpus all \
+		$(TAG)
+docker-clean:
+	docker rmi $(TAG)
+docker-purge:
+	docker system prune --all --force
