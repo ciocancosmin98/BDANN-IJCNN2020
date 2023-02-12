@@ -71,14 +71,14 @@ class CNN_Fusion(nn.Module):
 
         # IMAGE
         vgg_19 = torchvision.models.vgg19(pretrained=True)
-        params = []
-        for param in vgg_19.parameters():
-            param.requires_grad = False
+        # params = []
+        # for param in vgg_19.parameters():
+        #     param.requires_grad = False
 
-            params.append(param)
+        #     params.append(param)
 
-        params[-1].requires_grad = True # retrain last dense layer's bias
-        params[-2].requires_grad = True # retrain last dense layer's weights    
+        # params[-1].requires_grad = True # retrain last dense layer's bias
+        # params[-2].requires_grad = True # retrain last dense layer's weights    
 
         # visual model
         num_ftrs = vgg_19.classifier._modules['6'].out_features
@@ -291,7 +291,10 @@ def train_loop(model: CNN_Fusion, train_loader: DataLoader,
         [
             {'params': model.bert_model.parameters(), 'lr': lr * 1e-3, 'weight_decay': 0},
             {'params': model.class_classifier.parameters(), 'lr': lr},
-            {'params': model.domain_classifier.parameters(), 'lr': lr}
+            {'params': model.domain_classifier.parameters(), 'lr': lr},
+            {'params': model.vgg.parameters(), 'lr': lr * 1e-3, 'weight_decay': 0},
+            {'params': model.fc2.parameters(), 'lr': lr},
+            {'params': model.image_fc1.parameters(), 'lr': lr}
         ],
         #filter(lambda p: p.requires_grad, list(model.parameters())),
         lr=lr, 
@@ -299,6 +302,7 @@ def train_loop(model: CNN_Fusion, train_loader: DataLoader,
     )
 
     best_valid_acc = 0.0
+    best_valid_loss = 1e8
 
     epoch_steps = len(train_loader)
     total_steps = n_epochs * epoch_steps
@@ -344,18 +348,18 @@ def train_loop(model: CNN_Fusion, train_loader: DataLoader,
             acc_vector.append(accuracy.item())
 
         model.eval()
-        results_train = evaluate_loop(model, train_loader, domain_adaptation)
+        # results_train = evaluate_loop(model, train_loader, domain_adaptation)
         results_valid = evaluate_loop(model, valid_loader, domain_adaptation)
         model.train()
 
-        print("Train Acc: %.4f"
-            % (results_train['label']['accuracy']))
-        print("Train loss:\n%s\n"
-            % (results_train['label']['loss']))
-        print("Train report:\n%s\n"
-            % (results_train['label']['report']))
-        print("Train confusion matrix:\n%s\n"
-            % (results_train['label']['confusion_matrix']))
+        # print("Train Acc: %.4f"
+        #     % (results_train['label']['accuracy']))
+        # print("Train loss:\n%s\n"
+        #     % (results_train['label']['loss']))
+        # print("Train report:\n%s\n"
+        #     % (results_train['label']['report']))
+        # print("Train confusion matrix:\n%s\n"
+        #     % (results_train['label']['confusion_matrix']))
 
         print("Val Acc: %.4f"
             % (results_valid['label']['accuracy']))
@@ -367,8 +371,8 @@ def train_loop(model: CNN_Fusion, train_loader: DataLoader,
             % (results_valid['label']['confusion_matrix']))
 
         best = False
-        if results_valid['label']['accuracy'] > best_valid_acc:
-            best_valid_acc = results_valid['label']['accuracy']
+        if results_valid['label']['loss'] < best_valid_loss:
+            best_valid_loss = results_valid['label']['loss']
             best = True
 
         if not os.path.exists(save_dir):
