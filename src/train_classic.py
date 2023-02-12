@@ -190,32 +190,52 @@ class CNN_Fusion(nn.Module):
 
         return class_output, domain_output
 
-def load_dataset(dataset_path: str, subsets_save_path: str, images_root_path: str,
-    metadata: MetaData, source_topic: str, target_topic: str, batch_size = 16, 
-    verbose=False):
+def load_dataset(
+    train_path: str,
+    dev_path: str,
+    test_path: str,
+    subsets_save_path: str, 
+    images_root_path: str,
+    metadata: MetaData, 
+    source_topic: str, 
+    target_topic: str, 
+    batch_size = 8, 
+    verbose=False
+):
 
-    df = pd.read_csv(dataset_path, delimiter='\t')
+    df_train = pd.read_csv(train_path, delimiter='\t')
+    df_dev = pd.read_csv(dev_path, delimiter='\t')
+    df_test = pd.read_csv(test_path, delimiter='\t')
 
     if not source_topic is None:
         assert source_topic in metadata.domain_mapping
 
-        source_df = df[df.topic.isin([source_topic])].copy()
+        source_train_df = df_train[df_train.topic.isin([source_topic])].copy()
+        source_dev_df = df_dev[df_dev.topic.isin([source_topic])].copy()
 
-        assert len(source_df) > 0
+        # assert len(source_df) > 0
 
-        source_subset = create_subset(
-            subset=source_df, 
+        source_train = create_subset(
+            subset=source_train_df, 
             images_root_path=images_root_path, 
             subset_save_dir=subsets_save_path, 
-            name=source_topic,
+            name=f'source_{source_topic}_train',
             metadata=metadata,
             force=True
         )
-        if verbose:
-            source_subset.print_stats()
+        source_valid = create_subset(
+            subset=source_dev_df, 
+            images_root_path=images_root_path, 
+            subset_save_dir=subsets_save_path, 
+            name=f'source_{source_topic}_valid',
+            metadata=metadata,
+            force=True
+        )
+        # if verbose:
+        #     source_subset.print_stats()
         
-        source_train, source_valid = \
-            train_validate_split(source_subset, train_ratio=0.9, seed=29)
+        # source_train, source_valid = \
+        #     train_validate_split(source_subset, train_ratio=0.9, seed=29)
 
         src_train_loader = load_subset(source_train, batch_size, shuffle=True)
         src_valid_loader = load_subset(source_valid, batch_size, shuffle=False)
@@ -226,33 +246,47 @@ def load_dataset(dataset_path: str, subsets_save_path: str, images_root_path: st
     if not target_topic is None:
         assert target_topic in metadata.domain_mapping
 
-        target_df = df[df.topic.isin([target_topic])].copy()
+        # target_df = df[df.topic.isin([target_topic])].copy()
+        target_train_df = df_train[df_train.topic.isin([target_topic])].copy()
+        target_test_df = df_test[df_test.topic.isin([target_topic])].copy()
 
-        assert len(target_df) > 0
+        # assert len(target_df) > 0
 
-        target_subset = create_subset(
-            subset=target_df, 
+        target_train = create_subset(
+            subset=target_train_df, 
             images_root_path=images_root_path, 
             subset_save_dir=subsets_save_path, 
-            name=target_topic,
+            name=f'target_{target_topic}_valid',
             metadata=metadata,
             force=True
         )
-        if verbose:
-            target_subset.print_stats()
+        target_test = create_subset(
+            subset=target_test_df, 
+            images_root_path=images_root_path, 
+            subset_save_dir=subsets_save_path, 
+            name=f'target_{target_topic}_valid',
+            metadata=metadata,
+            force=True
+        )
+        # if verbose:
+        #     target_subset.print_stats()
         
-        target_train, target_valid = \
-            train_validate_split(target_subset, train_ratio=0.5, seed=29)
+        # target_train, target_valid = \
+        #     train_validate_split(target_subset, train_ratio=0.5, seed=29)
 
         tgt_train_loader = load_subset(target_train, batch_size, shuffle=True)
-        tgt_test_loader = load_subset(target_valid, batch_size, shuffle=False)
+        tgt_test_loader = load_subset(target_test, batch_size, shuffle=False)
     else:
         tgt_train_loader = None
         tgt_test_loader = None
 
     return (src_train_loader, src_valid_loader), (tgt_train_loader, tgt_test_loader)
 
-def evaluate_loop(model: CNN_Fusion, loader: DataLoader):
+def evaluate_loop(
+    model: CNN_Fusion, 
+    loader: DataLoader, 
+    save_predictions: Union[None, str] = None
+):
     total_label_loss = 0
     total_domain_loss = 0
     n = 0
@@ -262,6 +296,7 @@ def evaluate_loop(model: CNN_Fusion, loader: DataLoader):
         images = to_var(batch[1])
         labels = to_var(batch[2])
         # domains = to_var(batch[3])
+        ids_batch: List[str] = list(batch[4])
 
         with torch.no_grad():
             label_outputs = model.predict(text_tokens, images)
@@ -279,24 +314,36 @@ def evaluate_loop(model: CNN_Fusion, loader: DataLoader):
         if index == 0:
             label_pred = to_np(label_argmax.squeeze())
             label_true = to_np(labels.squeeze())
+            ids_all = ids_batch
             # domain_pred = to_np(domain_argmax.squeeze())
             # domain_true = to_np(domains.squeeze())
         else:
             label_pred = np.concatenate((label_pred, to_np(label_argmax.squeeze())), axis=0)
             label_true = np.concatenate((label_true, to_np(labels.squeeze())), axis=0)
+            ids_all.extend(ids_batch)
             # domain_pred = np.concatenate((domain_pred, to_np(domain_argmax.squeeze())), axis=0)
             # domain_true = np.concatenate((domain_true, to_np(domains.squeeze())), axis=0)
 
     preds = {
         'label': {
             'pred': label_pred,
-            'true': label_true
+            'true': label_true,
+            'ids': ids_all
         },
         'domain': {
             # 'pred': domain_pred,
             # 'true': domain_true
         }
     }
+
+    if save_predictions is not None:
+        data = {
+            'id': ids_all,
+            'predicted': list(label_pred),
+            'ground_truth': list(label_true),
+        }
+        results_df = pd.DataFrame.from_dict(data)
+        results_df.to_csv(save_predictions, index=False, sep='\t')
 
     results = {name: {} for name in preds}
     results['label']['loss'] = total_label_loss / n
@@ -339,7 +386,7 @@ def train_loop(
             {'params': model.bert_model.parameters(), 'lr': lr * 1e-3, 'weight_decay': 0},
             {'params': model.class_classifier.parameters(), 'lr': lr},
             {'params': model.domain_classifier.parameters(), 'lr': lr},
-            {'params': model.vgg.parameters(), 'lr': lr * 1e-3},
+            {'params': model.vgg.parameters(), 'lr': lr * 1e-3, 'weight_decay': 0},
             {'params': model.fc2.parameters(), 'lr': lr},
             {'params': model.image_fc1.parameters(), 'lr': lr}
         ],
@@ -348,7 +395,7 @@ def train_loop(
         weight_decay=0.1
     )
 
-    best_valid_acc = 0.0
+    best_valid_loss = 1e8
 
     epoch_steps = len(src_train_loader)
     total_steps = n_epochs * epoch_steps
@@ -440,8 +487,9 @@ def train_loop(
             % (results_valid['label']['confusion_matrix']))
 
         best = False
-        if results_valid['label']['accuracy'] > best_valid_acc:
-            best_valid_acc = results_valid['label']['accuracy']
+        curr_loss = results_valid['label']['loss'] 
+        if curr_loss < best_valid_loss:
+            best_valid_loss = curr_loss
             best = True
 
         if not os.path.exists(save_dir):
@@ -479,14 +527,19 @@ def main(args):
     recall_scores = []
     precision_scores = []
 
-    dataset_path = '../ROData/sarcasm_body_anonimized_1000_new.csv'
+    # dataset_path = '../ROData/musaro_processed.tsv'
+
+    train_path = '../ROData/musaro_train_processed.tsv'
+    dev_path = '../ROData/musaro_dev_processed.tsv'
+    test_path = '../ROData/musaro_test_processed.tsv'
+
     # dataset_path = '../ROData/sarcasm_title_anonimized_1000.csv'
     metadata_path = '../ROData/metadata.json'
     subsets_save_path = '../ROData/subsets'
-    images_root_path = '../ROData/images'
+    images_root_path = '../ROData/musaro_news/'
 
     metadata = create_metadata(
-        dataset_path=dataset_path, 
+        dataset_path=train_path, 
         images_root_path=images_root_path,
         metadata_path=metadata_path,
         force=False
@@ -494,7 +547,9 @@ def main(args):
 
     for run_index in tqdm(range(args.n_runs)):
         src_loaders, tgt_loaders = load_dataset(
-            dataset_path=dataset_path, 
+            train_path=train_path, 
+            dev_path=dev_path, 
+            test_path=test_path, 
             subsets_save_path=subsets_save_path, 
             images_root_path=images_root_path, 
             metadata=metadata, 
@@ -527,7 +582,7 @@ def main(args):
             model.cuda()
 
         model.eval()
-        results = evaluate_loop(model, tgt_test_loader)
+        results = evaluate_loop(model, tgt_test_loader, args.save_predictions)
 
         print("Test Acc: %.4f"
             % (results['label']['accuracy']))
@@ -537,6 +592,10 @@ def main(args):
             % (results['label']['report']))
         print("Test confusion matrix:\n%s\n"
             % (results['label']['confusion_matrix']))
+
+        if len(args.evaluate) != 0:
+            print(f"Results available at {args.save_predictions}")
+            exit()
 
         results = results['label']
 
@@ -585,7 +644,7 @@ def parse_arguments():
     parser.add_argument('--filter_num', type=int, default=5, help='')
     parser.add_argument('--lmbd', type=float, default=1, help='')
     parser.add_argument('--d_iter', type=int, default=3, help='')
-    parser.add_argument('--batch_size', type=int, default=16, help='')
+    parser.add_argument('--batch_size', type=int, default=4, help='')
     parser.add_argument('--num_epochs', type=int, default=1, help='')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='')
     parser.add_argument('--save_dir', type=str, default='../models/testrun')
@@ -594,6 +653,7 @@ def parse_arguments():
     parser.add_argument('--no_domain_adaptation', action='store_true')
     parser.add_argument('--source_topic', type=str, required=True)
     parser.add_argument('--target_topic', type=str, required=True)
+    parser.add_argument('--save_predictions', type=str, default=None)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--evaluate', type=str, default='', help='The path to the model to be evaluated.')
     parser.add_argument('--n_runs', type=int, default=1)
