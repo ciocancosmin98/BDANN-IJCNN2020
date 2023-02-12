@@ -103,7 +103,7 @@ def create_metadata(dataset_path: str, images_root_path: str, metadata_path: str
     topics.sort()
     domain_mapping = {topic: index for index, topic in enumerate(topics)}
 
-    labels: List[str] = list(df['sarcastic'].unique())
+    labels: List[str] = list(df['satiric'].unique())
     labels.sort()
     label_mapping = {label: index for index, label in enumerate(labels)}
 
@@ -205,6 +205,8 @@ class MultimodalDataset(Dataset):
 
         self.labels = df['label'].tolist()
 
+        self.ids = df['id'].tolist()
+
         # remove entries that were too large
         i = 0
         while i < len(self.text_tokens):
@@ -213,6 +215,7 @@ class MultimodalDataset(Dataset):
                 del self.image_paths[i]
                 del self.domains[i]
                 del self.labels[i]
+                del self.ids[i]
             else:
                 i += 1
 
@@ -250,7 +253,7 @@ class MultimodalDataset(Dataset):
 
     def __getitem__(self, idx: int):
         return self.text_tokens[idx], self._get_image(idx), \
-            torch.tensor(self.labels[idx]), torch.tensor(self.domains[idx])
+            torch.tensor(self.labels[idx]), torch.tensor(self.domains[idx]), self.ids[idx]
 
     def print_stats(self):
         by_label = {'name': 'Sorted by label'}
@@ -326,7 +329,7 @@ def create_subset(
         lambda domain_name: metadata.domain_mapping[domain_name]
     )
 
-    df['label'] = df['sarcastic'].apply(
+    df['label'] = df['satiric'].apply(
         lambda label: metadata.label_mapping[label]
     )
 
